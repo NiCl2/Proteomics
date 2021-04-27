@@ -10,6 +10,9 @@ library(SummarizedExperiment)
 library(modelr)
 library(limma)
 library(qvalue)
+library(ggplot2)
+library(ggrepel)
+library(splines)
 
 setwd("~/Documents/Proteomics/Setd1a_Dev/")
 
@@ -195,12 +198,13 @@ contrast_spec <- makeContrasts(
   # E18.WT-E14.WT,
   # P7.WT-E18.WT,
   # P35.WT-P7.WT,
-  # P70.WT-P35.WT,
-  E14.Het-E14.WT,
+  P70.WT-P35.WT,
+  # E14.Het-E14.WT,
   # E18.Het-E18.WT,
   # P7.Het-P7.WT,
   # P35.Het-P35.WT,
   # P70.Het-P70.WT,
+  # (P70.WT|P70.Het)-!(P70.WT|P70.Het),
   levels = MODEL
 )
 
@@ -208,7 +212,8 @@ contrast_spec <- makeContrasts(
 n <- dim(assays(ms_rse_filtered)$LFQ_intensity)[1]
 fit <- lmFit(assays(ms_rse_filtered)$LFQ_intensity, MODEL)
 fit_spec <- contrasts.fit(fit, contrast_spec)
-fit.eb <- eBayes(fit_spec)
+# fit.eb <- eBayes(fit_spec)
+fit.treat <- treat(fit_spec, lfc = log2(1.1))
 
 # extract results (one comparison only)
 get_output <- function(eb) {
@@ -229,28 +234,25 @@ get_output <- function(eb) {
   return(results.eb)
 }
 
-res.eb <- get_output(fit.eb)
+# res.eb <- get_output(fit.eb)
+# res.eb$symbol <- rownames(res.eb)
+res.treat <- get_output(fit.treat)
+res.treat$symbol <- rownames(res.treat)
 
-# volcano plots
-rx <- c(-1, 1)*max(abs(res.eb$logFC))*1.1
-ry <- c(0, ceiling(max(-log10(res.eb$p.ord), -log10(res.eb$p.mod))))
+# volcano plot
+lava_cutoff <- 0.05
+ggplot(res.treat, aes(x = logFC, y = -log10(p.mod), colour = q.mod < lava_cutoff)) + 
+  scale_color_manual(values = c("black", "red")) +
+  geom_text_repel(data = res.treat[res.treat$q.mod < lava_cutoff,], aes(label=symbol), show.legend = FALSE) +
+  theme_bw() + 
+  geom_point(show.legend = FALSE)
 
-par(mfrow=c(1,2), font.lab=2, cex.lab=1.2, font.axis=2, cex.axis=1.2)
-par(las=1, xaxs="i", yaxs="i")
+# volcanoplot(fit.treat, highlight = sum(res.treat$q.mod < lava_cutoff), names = rownames(fit.treat), hl.col = "red")
 
-plot(res.eb$logFC, -log10(res.eb$p.ord), pch=21, bg="lightgrey", cex=0.9, 
-     xlim=rx, ylim=ry,
-     xlab="log2 fold change", ylab="-log10  p-value")
-abline(v=seq(-2,2,1), col="lightgray", lty="dotted")
-abline(h=seq(0,ry[2],1), col="lightgray", lty="dotted")
-title("volcano plot of ordinary p-values")
+ggsave("volcano_P70WT-P35WT.png", width = 25, height = 25, units = "cm")
 
-plot(res.eb$logFC, -log10(res.eb$p.mod), pch=21, bg="lightgrey", cex=0.9,
-     xlim=rx, ylim=ry,
-     xlab="log2 fold change", ylab="-log10  p-value")
-abline(v=seq(-2,2,1), col="lightgray", lty="dotted")
-abline(h=seq(0,6,1), col="lightgray", lty="dotted")
-title("volcano plot of moderated p-values")
+# Spline analysis
+
 
 
 # two-sample t-tests
