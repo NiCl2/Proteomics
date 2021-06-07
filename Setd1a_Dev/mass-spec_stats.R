@@ -53,47 +53,17 @@ pre_post <- dplyr::select(pre_post, ENSEBLE.ID, Enrichment)
 ### ID CONVERSION ###
 #####################
 
-# # Uniprot gene name conversion function
-# uniprot_mapping <- function(ids) {
-#   uri <- 'http://www.uniprot.org/uniprot/?query='
-#   idStr <- paste(ids, collapse="+or+")
-#   format <- '&format=tab'
-#   fullUri <- paste0(uri,idStr,format)
-#   dat <- read.delim(fullUri)
-#   dat
-# }
-# 
-# # perform conversions (400 at a time, due to server limits)
-# setsOf400 <- floor(length(ms_raw$First.protein.ID) / 400)
-# if(setsOf400 > 0) {
-#   print(paste("Converting group 1 of", setsOf400 + 1, "protein groups"))
-#   Gene.names.uniprot <- uniprot_mapping(ms_raw$First.protein.ID[1:400])
-#   for (i in 2:setsOf400) {
-#     print(paste("Converting group", i, "of", setsOf400 + 1, "protein groups"))
-#     Gene.names.uniprot <- rbind(Gene.names.uniprot, uniprot_mapping(ms_raw$First.protein.ID[((i-1)*400 + 1):(i*400)]))
-#   }
-#   print(paste("Converting group", setsOf400 + 1, "of", setsOf400 + 1, "protein groups"))
-#   Gene.names.uniprot <- rbind(Gene.names.uniprot, uniprot_mapping(ms_raw$First.protein.ID[(setsOf400*400 + 1):length(ms_raw$First.protein.ID)]))
-# } else {
-#   Gene.names.uniprot <- uniprot_mapping(ms_raw$First.protein.ID)
-# }
-# # save / load local uniprot conversions
-# write.table(Gene.names.uniprot, "Gene.names.uniprot.txt", sep = "\t", row.names = F, col.names = T, quote = F)
-# Gene.names.uniprot <- read.table("Gene.names.uniprot.txt", sep = "\t", header = T, quote = NULL, fill = T)
+# uniprot id mapping ftp file
+Gene.IDs <- read.table("MOUSE_10090_idmapping_selected.tab", sep = "\t", na.strings = "") %>%
+  dplyr::select(1:3, 19) %>% dplyr::rename(UNIPROTKB = V1, GENEID = V2, ENTREZID = V3, ENSEMBL = V19)
+Gene.IDs$GENEID <- gsub("_MOUSE", "", Gene.IDs$GENEID)
 
+# select first ENTREZ / ENSEMBL ID if many
+Gene.IDs$ENSEMBL <- gsub(";.*", "", Gene.IDs$ENSEMBL)
+Gene.IDs$ENTREZID <- gsub(";.*", "", Gene.IDs$ENTREZID)
 
-# get Ensembl gene IDs from UniProt
-up.obj <- UniProt.ws(taxId = 10090)
-Gene.IDs <- UniProt.ws::select(up.obj, 
-                               keys = ms_raw$First.protein.ID,
-                               columns = c("UNIPROTKB", "ENSEMBL"),
-                               keytype = "UNIPROTKB")
-
-# remove unrequested entries
-
-
-# remove any 1:many conversions
-Gene.IDs <- Gene.IDs %>% group_by(UNIPROTKB) %>% filter(n() == 1) %>% ungroup
+# filter to match data
+Gene.IDs <- filter(Gene.IDs, UNIPROTKB %in% ms_raw$First.protein.ID)
 
 # get gene symbols from AnnotationDbi
 Gene.symbols <- unlist(AnnotationDbi::mapIds(org.Mm.eg.db, 
@@ -104,17 +74,19 @@ Gene.symbols <- unlist(AnnotationDbi::mapIds(org.Mm.eg.db,
 Gene.symbols <- data.frame(ENSEMBL = names(Gene.symbols), SYMBOL = Gene.symbols)
 
 # remove any 1:many conversions
-Gene.symbols <- Gene.symbols[!duplicated(Gene.symbols), ]
 Gene.symbols <- Gene.symbols %>% group_by(ENSEMBL) %>% filter(n() == 1) %>% ungroup
 
 # join
 Gene.IDs <- left_join(Gene.IDs, Gene.symbols, by = "ENSEMBL")
 
+# replace missing symbols with Uniprot entry names
+Gene.IDs$SYMBOL[is.na(Gene.IDs$SYMBOL)] <- Gene.IDs$GENEID[is.na(Gene.IDs$SYMBOL)]
+
 # get human IDs from biomaRt
 ensembl = useMart("ensembl")
 mm = useDataset("mmusculus_gene_ensembl", mart=ensembl)
 hu = useDataset("hsapiens_gene_ensembl", mart=ensembl)
-conv = getLDS(attributes = c("ensembl_gene_id", "mgi_symbol"), 
+conv = getLDS(attributes = c("ensembl_gene_id"), 
               filters="ensembl_gene_id", values = Gene.IDs$ENSEMBL, mart = mm, 
               attributesL = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"), martL = hu)
 
@@ -129,13 +101,15 @@ Gene.IDs <- left_join(Gene.IDs, pre_post, by = c("ENSEMBL" = "ENSEBLE.ID"))
 
 # get unique protein entries
 Gene.IDs_unique <- Gene.IDs[!duplicated(Gene.IDs$UNIPROTKB), ]
+Gene.IDs_unique <- Gene.IDs_unique[!duplicated(Gene.IDs$SYMBOL), ]
 
 # join to dataset
 ms_raw <- left_join(ms_raw, Gene.IDs_unique, by = c("First.protein.ID" = "UNIPROTKB"))
 
 # remove Gene ID (uniprot) duplicates, prioritising high intensity
-ms_raw <- group_by(ms_raw, ENSEMBL) %>% filter(Intensity == max(Intensity)) %>% ungroup
-ms_raw <- filter(ms_raw, !is.na(ENSEMBL))
+ms_raw <- group_by(ms_raw, First.protein.ID) %>% filter(Intensity == max(Intensity)) %>% ungroup
+ms_raw <- filter(ms_raw, !is.na(SYMBOL))
+ms_raw <- filter(ms_raw, !duplicated(SYMBOL))
 
 #############################
 ### SUMMARIZED EXPERIMENT ###
@@ -183,7 +157,7 @@ filtering_index <- cbind(ms_meta, t(assays(ms_rse)$LFQ_intensity) > 0) %>%
 ms_rse_filtered <- ms_rse[rowSums(filtering_index >= 4) >= 1, ]
 
 # set row names
-rownames(ms_rse_filtered) <- rowData(ms_rse_filtered)$ENSEMBL
+rownames(ms_rse_filtered) <- rowData(ms_rse_filtered)$SYMBOL
 
 # replace -Inf with NaN
 assays(ms_rse_filtered, withDimnames = F)$LFQ_intensity[assays(ms_rse_filtered, withDimnames = F)$LFQ_intensity == -Inf] <- NaN
@@ -232,15 +206,15 @@ sample_groups <- factor(paste(colData(ms_rse_filtered)$age, colData(ms_rse_filte
 MODEL <- model.matrix(~ 0 + sample_groups)
 colnames(MODEL) <- levels(sample_groups)
 contrast_spec <- makeContrasts(
-  E18.WT-E14.WT,
-  P7.WT-E18.WT,
-  P35.WT-P7.WT,
-  P70.WT-P35.WT,
-  # E14.Het-E14.WT,
-  # E18.Het-E18.WT,
-  # P7.Het-P7.WT,
-  # P35.Het-P35.WT,
-  # P70.Het-P70.WT,
+  # E18.WT-E14.WT,
+  # P7.WT-E18.WT,
+  # P35.WT-P7.WT,
+  # P70.WT-P35.WT,
+  E14.Het-E14.WT,
+  E18.Het-E18.WT,
+  P7.Het-P7.WT,
+  P35.Het-P35.WT,
+  P70.Het-P70.WT,
   # Diff.E18_E14 = (E18.Het-E14.Het)-(E18.WT-E14.WT),
   # Diff.P7_E18 = (P7.Het-E18.Het)-(P7.WT-E18.WT),
   # Diff.P35_P7 = (P35.Het-P7.Het)-(P35.WT-P7.WT),
@@ -252,16 +226,19 @@ contrast_spec <- makeContrasts(
 limma_analysis <- function(x, contrast_spec) {
   fit = lmFit(x, MODEL)
   fit_spec = contrasts.fit(fit, contrast_spec)
-  # fit.eb = eBayes(fit_spec) # for use with multiple simultaneous contrasts
-  # res.eb = topTable(fit.eb, number = Inf)
-  # res.eb$symbol = rownames(res.eb)
-  fit.treat = treat(fit_spec, lfc = log2(1.1))
-  res.treat = topTreat(fit.treat, number = Inf, adjust.method = "BH")
-  res.treat$EnsemblID = rownames(res.treat)
-  return(res.treat)
+  # EITHER
+  fit.eb = eBayes(fit_spec) # works with multiple simultaneous contrasts
+  res.eb = topTable(fit.eb, number = Inf)
+  res.eb$SYMBOL = rownames(res.eb)
+  
+  #OR
+  # fit.eb = eb(fit_spec, lfc = log2(1.1)) # ensure minimum logfc. Only works with single contrasts
+  # res.eb = topTreat(fit.eb, number = Inf, adjust.method = "BH")
+  # res.eb$SYMBOL = rownames(res.eb)
+  return(res.eb)
 }
 
-res.treat <- limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_spec = contrast_spec)
+res.eb <- limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_spec = contrast_spec)
 
 # extract results (one comparison only)
 # n <- dim(assays(ms_rse_filtered)$LFQ_intensity)[1]
@@ -285,37 +262,36 @@ res.treat <- limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_
 
 # res.eb <- get_output(fit.eb)
 # res.eb$symbol <- rownames(res.eb)
-# res.treat <- get_output(fit.treat)
 
 # volcano plot
-volcano_plot <- function(res.treat) {
+volcano_plot <- function(res.eb) {
   lava_cutoff <- 0.05
-  ggplot(res.treat, aes(x = logFC, y = -log10(P.Value), colour = adj.P.Val < lava_cutoff)) + 
+  ggplot(res.eb, aes(x = logFC, y = -log10(P.Value), colour = adj.P.Val < lava_cutoff)) + 
     scale_color_manual(values = c("black", "red")) +
-    geom_text_repel(data = res.treat[res.treat$adj.P.Val < lava_cutoff,], aes(label=SYMBOL), show.legend = FALSE) +
+    geom_text_repel(data = res.eb[res.eb$adj.P.Val < lava_cutoff,], aes(label=SYMBOL), show.legend = FALSE) +
     theme_bw() + 
     geom_point(show.legend = FALSE)
 }
 
-volcano_plot(res.treat)
+volcano_plot(res.eb)
 
 # alternative volcano plot method
-# volcanoplot(fit.treat, highlight = sum(res.treat$q.mod < lava_cutoff), names = rownames(fit.treat), hl.col = "red")
+# volcanoplot(fit.eb, highlight = sum(res.eb$q.mod < lava_cutoff), names = rownames(fit.eb), hl.col = "red")
 
 ggsave("volcano_P70WT-P35WT.png", width = 25, height = 25, units = "cm")
 
 # Loop over contrasts
 
 contrast_list <- c(
-  # "E18.WT-E14.WT",
-  # "P7.WT-E18.WT",
-  # "P35.WT-P7.WT",
-  # "P70.WT-P35.WT"
-  "E14.Het-E14.WT",
-  "E18.Het-E18.WT",
-  "P7.Het-P7.WT",
-  "P35.Het-P35.WT",
-  "P70.Het-P70.WT"
+  "E18.WT-E14.WT",
+  "P7.WT-E18.WT",
+  "P35.WT-P7.WT",
+  "P70.WT-P35.WT"
+  # "E14.Het-E14.WT",
+  # "E18.Het-E18.WT",
+  # "P7.Het-P7.WT",
+  # "P35.Het-P35.WT",
+  # "P70.Het-P70.WT"
   # "(E18.Het-E14.Het)-(E18.WT-E14.WT)",
   # "(P7.Het-E18.Het)-(P7.WT-E18.WT)",
   # "(P35.Het-P7.Het)-(P35.WT-P7.WT)",
@@ -338,43 +314,54 @@ for (i in 1:length(contrast_list)) {
   each.res = limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_spec = contrast_spec)
   
   # append meta data (Ensembl ID and pre/post synapse bias)
-  each.res = left_join(each.res, Gene.IDs_unique, by = c("EnsemblID" = "ENSEMBL"))
+  each.res = left_join(each.res, Gene.IDs_unique, by = "SYMBOL")
+  each.res <- filter(each.res, !duplicated(SYMBOL))
   
   write.table(each.res, paste0("DE_", each_contrast, ".txt"), sep = "\t", row.names = F, col.names = T, quote = F)
   volcano_plot(each.res)
   ggsave(paste0("volcano_", each_contrast, ".png"), units = "cm", width = 25, height = 25)
   
   # collate gene sets
+  if(any(each.res$adj.P.Val < 0.05, na.rm = T)){
+    gs.all = data.frame(GeneSetID = paste0("DE_", each_contrast, "_All"), EnsemblID = filter(each.res, adj.P.Val < 0.05)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.all)
+  }
   if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0, na.rm = T)){
     gs.up = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up)
   }
   if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0, na.rm = T)){
     gs.down = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down)
   }
   if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "PSD", na.rm = T)){
     gs.up_psd = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_PSD-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "PSD")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up_psd)
   }
   if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "Syn", na.rm = T)){
     gs.up_syn = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_Syn-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "Syn")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up_syn)
   }
-  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & (each.res$Enrichment == "NS" & each.res$PSD.enriched == ""), na.rm = T)){
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "NS", na.rm = T)){
     gs.up_ns = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_not-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "NS")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up_ns)
   }
   if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "PSD", na.rm = T)){
     gs.down_psd = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_PSD-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "PSD")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down_psd)
   }
   if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "Syn", na.rm = T)){
     gs.down_syn = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_Syn-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "Syn")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down_syn)
   }
-  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & (each.res$Enrichment == "NS" & each.res$PSD.enriched == ""), na.rm = T)){
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "NS", na.rm = T)){
     gs.down_ns = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_not-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "NS")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down_ns)
   }
-  
-  genesets <- rbind(genesets, gs.up, gs.down, gs.up_psd, gs.up_syn, gs.up_ns, gs.down_psd, gs.down_syn, gs.down_ns)
   
 }
 
-# add geneset for constituent synaptic proteins
+# add geneset for constituent synaptic proteins (for age contrasts)
 genesets <- rbind(genesets, data.frame(GeneSetID = "synaptosome_no-changes", EnsemblID = setdiff(genesets$EnsemblID[genesets$GeneSetID == "All_synaptosome"], genesets$EnsemblID[genesets$GeneSetID != "All_synaptosome"])))
 
 # write gene sets for downstream analyses
@@ -384,7 +371,6 @@ write.table(genesets, "DE_Dev-steps_up-down_enrichment_genesets.txt", sep = "\t"
 genesets_entrez <- genesets %>% left_join(Gene.IDs_unique, by = c("EnsemblID" = "Gene.stable.ID.1")) %>% dplyr::select(GeneSetID, NCBI.gene..formerly.Entrezgene..ID) %>%
   group_by(GeneSetID) %>% filter(!duplicated(NCBI.gene..formerly.Entrezgene..ID))
 write.table(genesets_entrez, "DE_Dev-steps_up-down_enrichment_genesets_entrez.txt", sep = "\t", row.names = F, col.names = F, quote = F)
-
 
 # Spline analysis
 
@@ -402,7 +388,7 @@ res.spline <- topTable(spline.eb, coef = 7:10, number = Inf)
 # plot wt vs het developmental protein expression of selected genes
 plot_select <- rownames(res.spline)[1:10]
 plot_select <- rownames(res.eb)[1:10]
-plot_select <- rownames(res.treat)[1:10]
+plot_select <- c("Comt")
 lfq.struct <- as.data.frame(t(assays(ms_rse_filtered)$LFQ_intensity[plot_select, ]))
 lfq.struct$stage <- colData(ms_rse_filtered)$age
 lfq.struct$genotype <- colData(ms_rse_filtered)$genotype
@@ -427,10 +413,10 @@ for (i in 1:length(plot_select)) {
           axis.title.y = element_text(size = 10))
 }
 plot_grid(plotlist = spline_plots, nrow = 2)
-ggsave("Splines_Het-WT_top10.png", units = "cm", width = 30, height = 10)
+# ggsave("DevPlots_RNA-analysis_Het-WT_top10.png", units = "cm", width = 30, height = 10)
 
 
-## Cluster by developmental change (iBAQ)
+## Cluster by developmental change
 
 # filter for wildtype samples
 LFQ.mean <- as.data.frame(assays(ms_rse_filtered[, colData(ms_rse_filtered)$genotype == "WT"])$LFQ_intensity)
@@ -495,8 +481,8 @@ ggsave("clusters_wt_1-4_norm.png", units = "cm", width = 60, height = 30)
 
 # create cluster genesets
 gs_clusters <- data.frame(GeneSetID = paste0("cluster_", LFQ.km$cluster), 
-                          EnsemblID = rownames(LFQ.mean)) %>%
-  left_join(Gene.IDs_unique, by = c("EnsemblID" = "ENSEMBL"))
+                          GeneSymbol = rownames(LFQ.mean)) %>%
+  left_join(Gene.IDs_unique, by = c("GeneSymbol" = "SYMBOL"))
 
 gs_clusters.all <- gs_clusters %>%
   dplyr::select(GeneSetID, Gene.stable.ID.1) %>%
