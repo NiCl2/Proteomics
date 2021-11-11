@@ -82,6 +82,9 @@ Gene.IDs <- left_join(Gene.IDs, Gene.symbols, by = "ENSEMBL")
 # replace missing symbols with Uniprot entry names
 Gene.IDs$SYMBOL[is.na(Gene.IDs$SYMBOL)] <- Gene.IDs$GENEID[is.na(Gene.IDs$SYMBOL)]
 
+# add Syt2 ENSEMBL ID
+Gene.IDs$ENSEMBL[Gene.IDs$GENEID == "SYT2"] <- "ENSMUSG00000026452"
+
 # get human IDs from biomaRt
 ensembl = useMart("ensembl")
 mm = useDataset("mmusculus_gene_ensembl", mart=ensembl)
@@ -103,6 +106,8 @@ Gene.IDs <- left_join(Gene.IDs, pre_post, by = c("ENSEMBL" = "ENSEBLE.ID"))
 Gene.IDs_unique <- Gene.IDs[!duplicated(Gene.IDs$UNIPROTKB), ]
 Gene.IDs_unique <- Gene.IDs_unique[!duplicated(Gene.IDs$SYMBOL), ]
 
+
+
 # join to dataset
 ms_raw <- left_join(ms_raw, Gene.IDs_unique, by = c("First.protein.ID" = "UNIPROTKB"))
 
@@ -110,6 +115,10 @@ ms_raw <- left_join(ms_raw, Gene.IDs_unique, by = c("First.protein.ID" = "UNIPRO
 ms_raw <- group_by(ms_raw, First.protein.ID) %>% filter(Intensity == max(Intensity)) %>% ungroup
 ms_raw <- filter(ms_raw, !is.na(SYMBOL))
 ms_raw <- filter(ms_raw, !duplicated(SYMBOL))
+
+# filter for proteins encoded by tissue expressed genes (leave empty Ensembl IDs)
+# brain_exp <- read.table("~/Documents/RNAseq/Setd1a/DEG_Setd1aHet-WT_AllTimepointsRegressed_mm_gs.txt") %>% filter(V1 == "background_expressed-pc") %>% dplyr::select(V2) %>% unlist
+# ms_raw <- filter(ms_raw, ENSEMBL %in% brain_exp | is.na(ENSEMBL))
 
 #############################
 ### SUMMARIZED EXPERIMENT ###
@@ -230,33 +239,51 @@ limma_analysis <- function(x, contrast_spec) {
   fit = lmFit(x, MODEL)
   fit_spec = contrasts.fit(fit, contrast_spec)
   # EITHER
-  fit.eb = eBayes(fit_spec) # works with multiple simultaneous contrasts
+  fit.eb = eBayes(fit_spec, trend = T, robust = T) # works with multiple simultaneous contrasts
   res.eb = topTable(fit.eb, number = Inf)
   res.eb$SYMBOL = rownames(res.eb)
   
   #OR
-  # fit.eb = eb(fit_spec, lfc = log2(1.1)) # ensure minimum logfc. Only works with single contrasts
+  # fit.eb = treat(fit_spec, lfc = log2(1.1)) # ensure minimum logfc. Only works with single contrasts
   # res.eb = topTreat(fit.eb, number = Inf, adjust.method = "BH")
   # res.eb$SYMBOL = rownames(res.eb)
   return(res.eb)
 }
 
-res.eb <- limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_spec = contrast_spec)
+res.eb <- limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_spec = contrast_spec) %>%
+  mutate(SYMBOL = rownames(.)) %>% left_join(as.data.frame(rowData(ms_rse_filtered)), by = "SYMBOL")
+rownames(res.eb) <- res.eb$SYMBOL
 
 # write to file
-res.eb <- left_join(res.eb, Gene.IDs, by = "SYMBOL")
-write.table(res.eb, "DEP_Setd1aHet-WT_Embryonic.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+# res.eb <- left_join(res.eb, Gene.IDs, by = "SYMBOL")
+write.table(res.eb, "DEP_ageXgenotype_contrasts.txt", sep = "\t", row.names = F, col.names = T, quote = F)
 # write gene property file
 res.gp <- res.eb %>% dplyr::select(Gene.stable.ID.1, "F") %>% filter(complete.cases(.)) %>% filter(!duplicated(Gene.stable.ID.1))
 write.table(res.gp, "DEP_Setd1aHet-WT_AllTimepoints_gp.txt", sep = "\t", row.names = F, col.names = T, quote = F)
 
 # classic models
-# colData(ms_rse_filtered)$genotype <- factor(colData(ms_rse_filtered)$genotype, levels = c("WT", "Het"))
-# MODEL <- model.matrix(~synaptosome.conc + age + genotype, 
-#                       data = colData(ms_rse_filtered))
-# fit <- lmFit(assays(ms_rse_filtered)$LFQ_intensity, MODEL)
-# fit.eb <- eBayes(fit)
-# res.eb <- topTable(fit.eb, coef="genotypeHet", number = Inf)
+colData(ms_rse_filtered)$genotype <- factor(colData(ms_rse_filtered)$genotype, levels = c("WT", "Het"))
+colData(ms_rse_filtered)$age <- factor(colData(ms_rse_filtered)$age, levels = c("E14", "E18", "P7", "P35", "P70"))
+MODEL <- model.matrix(~ age + genotype,
+                      data = colData(ms_rse_filtered))
+fit <- lmFit(assays(ms_rse_filtered)$LFQ_intensity, MODEL)
+fit.eb <- eBayes(fit, trend = T, robust = T)
+res.eb <- topTable(fit.eb, coef="genotypeHet", number = Inf) %>%
+  mutate(SYMBOL = rownames(.)) %>% left_join(as.data.frame(rowData(ms_rse_filtered)), by = "SYMBOL")
+rownames(res.eb) <- res.eb$SYMBOL
+write.table(res.eb, "DEP_Setd1aHet-WT_AllTimepointsRegressed.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+
+# interaction model
+MODEL.i <- model.matrix(~ age * genotype,
+                      data = colData(ms_rse_filtered))
+fit <- lmFit(assays(ms_rse_filtered)$LFQ_intensity, MODEL.i)
+fit.eb <- eBayes(fit)
+# res.eb <- topTable(fit.eb, coef=c(7:10), number = Inf) %>%
+res.eb <- topTable(fit.eb, coef="genotypeHet", number = Inf) %>%
+  mutate(SYMBOL = rownames(.)) %>% left_join(as.data.frame(rowData(ms_rse_filtered)), by = "SYMBOL")
+rownames(res.eb) <- res.eb$SYMBOL
+write.table(res.eb, "DEP_Setd1a_ageXgenotype.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+
 
 # extract results (one comparison only)
 # n <- dim(assays(ms_rse_filtered)$LFQ_intensity)[1]
@@ -281,17 +308,35 @@ write.table(res.gp, "DEP_Setd1aHet-WT_AllTimepoints_gp.txt", sep = "\t", row.nam
 # res.eb <- get_output(fit.eb)
 # res.eb$symbol <- rownames(res.eb)
 
+
 # volcano plot
-volcano_plot <- function(res.eb) {
+volcano_plot <- function(res.eb, title) {
   lava_cutoff <- 0.05
-  ggplot(res.eb, aes(x = logFC, y = -log10(P.Value), colour = adj.P.Val < lava_cutoff)) + 
-    scale_color_manual(values = c("black", "red")) +
+  
+  # create variable for colouring volcano by pre/post enrichment
+  res.eb$Enrichment[is.na(res.eb$Enrichment)] <- "unknown"
+  res.eb$Enrichment_sig <- factor(ifelse(res.eb$adj.P.Val < lava_cutoff, no = "NotDEP", yes = res.eb$Enrichment), levels = c("NotDEP", "NS", "PSD", "Syn", "unknown"))
+  
+  # ggplot(res.eb, aes(x = logFC, y = -log10(P.Value), colour = adj.P.Val < lava_cutoff)) + 
+  #   scale_color_manual(values = c("black", "red")) +
+  ggplot(res.eb, aes(x = logFC, y = -log10(P.Value), colour = Enrichment_sig)) + 
+    scale_color_manual(values = c("NotDEP" = "gray18", "NS" = "orangered", "PSD" = "dodgerblue", "Syn" = "green3", "unknown" = "orangered")) +
     geom_text_repel(data = res.eb[res.eb$adj.P.Val < lava_cutoff,], aes(label=SYMBOL), show.legend = FALSE) +
-    theme_bw() + 
+    theme_classic() + 
+    ggtitle(title) +
+    theme(axis.text.y = element_text(size = 12),
+          axis.text.x = element_text(size = 12),
+          axis.title.x = element_text(size = 12), 
+          axis.title.y = element_text(size = 12)) +
+    xlab(expression(log["2"]*FC)) + 
+    ylab(expression(-log["10"]*P)) +
+    scale_x_continuous(limits = c(-4.5, 4.5), breaks = c(-4, -3, -2, -1, 0, 1, 2, 3, 4, 5)) +
+    # xlim(c(-4.5, 4.5)) +
+    ylim(c(0, 8)) +
     geom_point(show.legend = FALSE)
 }
 
-volcano_plot(res.eb)
+volcano_plot(res.eb, "volcano plot")
 
 # alternative volcano plot method
 # volcanoplot(fit.eb, highlight = sum(res.eb$q.mod < lava_cutoff), names = rownames(fit.eb), hl.col = "red")
@@ -317,8 +362,15 @@ contrast_list <- c(
 )
 
 # prime gene set output
-genesets <- data.frame(GeneSetID = "All_synaptosome", EnsemblID = rowData(ms_rse_filtered)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+genesets <- data.frame(GeneSetID = "All_synaptosome", EnsemblID = rowData(ms_rse_filtered)$ENSEMBL, EnsemblID_hu = rowData(ms_rse_filtered)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
 
+# cheat mouse protein symbols
+rownames(ms_rse_filtered)[rownames(ms_rse_filtered) == "SYT2"] <- "Syt2"
+rownames(ms_rse_filtered)[rownames(ms_rse_filtered) == "MRTFB"] <- "Mrtfb"
+rowData(ms_rse_filtered)$SYMBOL[rowData(ms_rse_filtered)$SYMBOL == "SYT2"] <- "Syt2"
+rowData(ms_rse_filtered)$SYMBOL[rowData(ms_rse_filtered)$SYMBOL == "MRTFB"] <- "Mrtfb"
+
+volcano_list <- list()
 for (i in 1:length(contrast_list)) {
   # get each contrast specification
   each_contrast = contrast_list[i]
@@ -332,63 +384,79 @@ for (i in 1:length(contrast_list)) {
   each.res = limma_analysis(x = assays(ms_rse_filtered)$LFQ_intensity, contrast_spec = contrast_spec)
   
   # append meta data (Ensembl ID and pre/post synapse bias)
-  each.res = left_join(each.res, Gene.IDs_unique, by = "SYMBOL")
-  each.res <- filter(each.res, !duplicated(SYMBOL))
+  each.res = left_join(each.res, as.data.frame(rowData(ms_rse_filtered)), by = "SYMBOL")
+  each.res = filter(each.res, !duplicated(SYMBOL))
+  # write.table(each.res, paste0("DEP_", each_contrast, ".txt"), sep = "\t", row.names = F, col.names = T, quote = F)
   
-  write.table(each.res, paste0("DE_", each_contrast, ".txt"), sep = "\t", row.names = F, col.names = T, quote = F)
-  volcano_plot(each.res)
-  ggsave(paste0("volcano_", each_contrast, ".png"), units = "cm", width = 25, height = 25)
+  volcano_list[[i]] <- volcano_plot(each.res, each_contrast)
+  volcano_plot(each.res, each_contrast)
+  # ggsave(paste0("volcano_", each_contrast, ".png"), units = "cm", width = 25, height = 25)
   
   # collate gene sets
-  # if(any(each.res$adj.P.Val < 0.05, na.rm = T)){
-  #   gs.all = data.frame(GeneSetID = paste0("DE_", each_contrast, "_All"), EnsemblID = filter(each.res, adj.P.Val < 0.05)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.all)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0, na.rm = T)){
-  #   gs.up = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.up)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0, na.rm = T)){
-  #   gs.down = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.down)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "PSD", na.rm = T)){
-  #   gs.up_psd = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_PSD-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "PSD")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.up_psd)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "Syn", na.rm = T)){
-  #   gs.up_syn = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_Syn-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "Syn")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.up_syn)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "NS", na.rm = T)){
-  #   gs.up_ns = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_not-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "NS")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.up_ns)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "PSD", na.rm = T)){
-  #   gs.down_psd = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_PSD-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "PSD")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.down_psd)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "Syn", na.rm = T)){
-  #   gs.down_syn = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_Syn-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "Syn")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.down_syn)
-  # }
-  # if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "NS", na.rm = T)){
-  #   gs.down_ns = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_not-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "NS")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
-  #   genesets <- rbind(genesets, gs.down_ns)
-  # }
+  if(any(each.res$adj.P.Val < 0.05, na.rm = T)){
+    gs.all = data.frame(GeneSetID = paste0("DE_", each_contrast, "_All"), EnsemblID = filter(each.res, adj.P.Val < 0.05)$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.all)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0, na.rm = T)){
+    gs.up = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0)$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC > 0)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0, na.rm = T)){
+    gs.down = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0)$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC < 0)$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "PSD", na.rm = T)){
+    gs.up_psd = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_PSD-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "PSD")$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "PSD")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up_psd)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "Syn", na.rm = T)){
+    gs.up_syn = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_Syn-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "Syn")$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "Syn")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up_syn)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC > 0 & each.res$Enrichment == "NS", na.rm = T)){
+    gs.up_ns = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Up_not-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "NS")$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC > 0 & Enrichment == "NS")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.up_ns)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "PSD", na.rm = T)){
+    gs.down_psd = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_PSD-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "PSD")$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "PSD")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down_psd)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "Syn", na.rm = T)){
+    gs.down_syn = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_Syn-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "Syn")$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "Syn")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down_syn)
+  }
+  if(any(each.res$adj.P.Val < 0.05 & each.res$logFC < 0 & each.res$Enrichment == "NS", na.rm = T)){
+    gs.down_ns = data.frame(GeneSetID = paste0("DE_", each_contrast, "_Down_not-enriched"), EnsemblID = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "NS")$SYMBOL, EnsemblID_hu = filter(each.res, adj.P.Val < 0.05 & logFC < 0 & Enrichment == "NS")$Gene.stable.ID.1) %>% filter(!is.na(EnsemblID))
+    genesets <- rbind(genesets, gs.down_ns)
+  }
   
 }
 
+plot_grid(plotlist = volcano_list, nrow = 1)
+
 # add geneset for constituent synaptic proteins (for age contrasts)
-genesets <- rbind(genesets, data.frame(GeneSetID = "synaptosome_no-changes", EnsemblID = setdiff(genesets$EnsemblID[genesets$GeneSetID == "All_synaptosome"], genesets$EnsemblID[genesets$GeneSetID != "All_synaptosome"])))
+# genesets <- rbind(genesets, data.frame(GeneSetID = "synaptosome_no-changes", EnsemblID = setdiff(genesets$EnsemblID[genesets$GeneSetID == "All_synaptosome"], genesets$EnsemblID[genesets$GeneSetID != "All_synaptosome"])))
+
+# add geneset for change at any timepoints
+geneset_any <- data.frame(GeneSetID = "DE_AnyTimepoint", EnsemblID = genesets$EnsemblID[genesets$GeneSetID != "All_synaptosome"], EnsemblID_hu = genesets$EnsemblID_hu[genesets$GeneSetID != "All_synaptosome"]) %>% filter(!duplicated(EnsemblID))
+geneset_any_up <- filter(genesets, grepl("_Up", GeneSetID)) %>% filter(!duplicated(EnsemblID))
+geneset_any_up$GeneSetID <- "DE_AnyTimepoint_Up"
+geneset_any_down <- filter(genesets, grepl("_Down", GeneSetID)) %>% filter(!duplicated(EnsemblID))
+geneset_any_down$GeneSetID <- "DE_AnyTimepoint_Down"
+geneset_PSD <- filter(genesets, grepl("_PSD", GeneSetID)) %>% filter(!duplicated(EnsemblID))
+geneset_PSD$GeneSetID <- "DE_AnyTimepoint_PSD"
+geneset_SYN <- filter(genesets, grepl("_Syn", GeneSetID)) %>% filter(!duplicated(EnsemblID))
+geneset_SYN$GeneSetID <- "DE_AnyTimepoint_Syn"
+genesets <- rbind(genesets, geneset_any, geneset_any_up, geneset_any_down, geneset_PSD, geneset_SYN)
 
 # write gene sets for downstream analyses
-write.table(genesets, "DEP_Het-WT_EachTimepoint_up-down_enrichment_gs.txt", sep = "\t", row.names = F, col.names = F, quote = F)
+write.table(dplyr::select(genesets, 1,2), "DEP_Setd1aHet-WT_EachTimepoint_up-down_enrichment_mm_gs.txt", sep = "\t", row.names = F, col.names = F, quote = F)
+write.table(dplyr::select(genesets, 1,3) %>% filter(!is.na(EnsemblID_hu)), "DEP_Setd1aHet-WT_EachTimepoint_up-down_enrichment_gs.txt", sep = "\t", row.names = F, col.names = F, quote = F)
 
 # write ENTREZ ID version
-genesets_entrez <- genesets %>% left_join(Gene.IDs_unique, by = c("EnsemblID" = "Gene.stable.ID.1")) %>% dplyr::select(GeneSetID, NCBI.gene..formerly.Entrezgene..ID) %>%
-  group_by(GeneSetID) %>% filter(!duplicated(NCBI.gene..formerly.Entrezgene..ID))
-write.table(genesets_entrez, "DEP_Dev-steps_up-down_enrichment_genesets_entrez.txt", sep = "\t", row.names = F, col.names = F, quote = F)
+genesets_entrez <- genesets %>% left_join(Gene.IDs_unique, by = c("EnsemblID_hu" = "Gene.stable.ID.1")) %>% dplyr::select(GeneSetID, NCBI.gene..formerly.Entrezgene..ID) %>%
+  group_by(GeneSetID) %>% filter(!duplicated(NCBI.gene..formerly.Entrezgene..ID)) %>% filter(!is.na(NCBI.gene..formerly.Entrezgene..ID))
+write.table(genesets_entrez, "DEP_Setd1aHet-WT_EachTimepoint_up-down_enrichment_gs_entrez.txt", sep = "\t", row.names = F, col.names = F, quote = F)
 
 # Spline analysis
 
@@ -405,8 +473,8 @@ res.spline <- topTable(spline.eb, coef = 7:10, number = Inf)
 
 # plot wt vs het developmental protein expression of selected genes
 plot_select <- rownames(res.spline)[1:10]
-plot_select <- rownames(res.eb)[1:10]
-plot_select <- c("SYT2")
+plot_select <- rownames(res.eb)[1:6]
+plot_select <- c("SYT2", "Shisa7")
 lfq.struct <- as.data.frame(t(assays(ms_rse_filtered)$LFQ_intensity[plot_select, ]))
 lfq.struct$stage <- colData(ms_rse_filtered)$age
 lfq.struct$genotype <- colData(ms_rse_filtered)$genotype
@@ -417,20 +485,21 @@ for (i in 1:length(plot_select)) {
   spline_plots[[i]] <- ggplot(filter(lfq.struct, variable == plot_select[i]), aes(x = stage, y = value, group = genotype, colour = genotype)) +
     geom_point(alpha = 0.2) +
     geom_smooth(method = "loess", alpha = 0.15, aes(colour = genotype, fill = genotype), level = 0.95) + 
-    scale_color_manual(values=c("purple3", "steelblue3")) +
+    scale_color_manual(values=c("#0F7FFE", "#FB0106")) + 
+    scale_fill_manual(values=c("#0F7FFE", "#FB0106")) + 
     ggtitle(plot_select[i]) +
     theme_cowplot() +
     ylab("Normalized LFQ intensity") +
     theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10), 
           plot.title = element_text(size = 10),
-          legend.position = "none",
+          # legend.position = "none",
           legend.title = element_blank(),
           legend.text = element_text(size = 10),
           axis.text.y = element_text(size = 10),
           axis.title.x = element_blank(), 
           axis.title.y = element_text(size = 10))
 }
-plot_grid(plotlist = spline_plots, nrow = 2)
+plot_grid(plotlist = spline_plots, nrow = 1)
 # ggsave("DevPlots_DE_Het-WT_AllTimepoints_top10.png", units = "cm", width = 30, height = 10)
 
 
